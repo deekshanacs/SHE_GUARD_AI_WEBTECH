@@ -1,8 +1,8 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Upload, FileImage, Loader2, AlertTriangle, CheckCircle,
-  XCircle, Cpu, FileText, ChevronDown, ChevronUp, WifiOff, Info
+  XCircle, Cpu, FileText, ChevronDown, ChevronUp, WifiOff, Info, RefreshCw
 } from "lucide-react";
 import { type AnalysisResult } from "@/lib/mockApi";
 import Navbar from "@/components/Navbar";
@@ -39,10 +39,25 @@ const UploadPage = () => {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<ExtendedAnalysisResult | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // FIX #1: backendOffline tracks whether the backend is unreachable.
-  // When true, we show a clear error — we never silently return fake results.
   const [backendOffline, setBackendOffline] = useState(false);
+  // Tracks whether the backend is still waking up (Render free tier cold start)
+  const [serverWaking, setServerWaking] = useState(false);
   const [showMethodology, setShowMethodology] = useState(false);
+
+  // Ping the backend health endpoint as soon as the page loads so Render's
+  // free-tier instance starts warming up before the user clicks Analyze.
+  useEffect(() => {
+    const pingBackend = async () => {
+      try {
+        const res = await fetch(`${API_BASE_URL}/health`, { method: "GET" });
+        if (!res.ok) setServerWaking(true);
+      } catch {
+        // Backend is sleeping — show a gentle heads-up
+        setServerWaking(true);
+      }
+    };
+    pingBackend();
+  }, []);
 
   const handleFile = (f: File) => {
     const validTypes = ["image/jpeg", "image/jpg", "image/png", "image/webp"];
@@ -76,11 +91,13 @@ const UploadPage = () => {
     setLoading(true);
     setError(null);
     setBackendOffline(false);
+    setServerWaking(false);
 
     try {
       const formData = new FormData();
       formData.append("file", file);
 
+      // If the server was waking up, give it a moment before the real request
       const response = await fetch(`${API_BASE_URL}/api/analyze`, {
         method: "POST",
         headers: { "X-Requested-With": "sheguard-client" },
@@ -99,6 +116,7 @@ const UploadPage = () => {
 
       const res = await response.json();
       setResult(res);
+      setServerWaking(false);
 
       // Cache real results to localStorage (no fake data ever stored)
       const cached = localStorage.getItem("sheguard_cases");
@@ -113,13 +131,11 @@ const UploadPage = () => {
         details: res.details,
         metadata: res.metadata,
         ela_image: res.ela_image,
-        isDemo: false,  // Always false for real results
+        isDemo: false,
       });
       localStorage.setItem("sheguard_cases", JSON.stringify(casesList));
 
     } catch (err: any) {
-      // FIX #1: When the backend is unreachable we show a clear error.
-      // We do NOT silently fall back to random number generation.
       const msg: string = err?.message || "";
       const isNetworkError =
         msg.includes("Failed to fetch") ||
@@ -129,9 +145,10 @@ const UploadPage = () => {
 
       if (isNetworkError) {
         setBackendOffline(true);
+        setServerWaking(true);
         setError(
-          "The analysis server is currently offline. Real forensic analysis requires " +
-          "the backend to be running. Please try again in a few moments."
+          "The analysis server is waking up (Render free tier spins down after inactivity). " +
+          "Please wait ~30 seconds and click Analyze again."
         );
       } else {
         setError(`Analysis failed: ${msg}`);
@@ -230,7 +247,23 @@ const UploadPage = () => {
           )}
         </motion.div>
 
-        <div className="mt-6 flex justify-center">
+        <div className="mt-6 flex flex-col items-center gap-4">
+          {/* Server waking up banner — shown on page load if backend is cold */}
+          {serverWaking && !error && (
+            <motion.div
+              initial={{ opacity: 0, y: -8 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="w-full glass-card border-yellow-500/40 p-3 text-center"
+            >
+              <div className="flex items-center justify-center gap-2 text-yellow-400">
+                <RefreshCw className="h-4 w-4 animate-spin" aria-hidden="true" />
+                <p className="text-xs font-semibold">
+                  Server is waking up — this may take ~30 seconds on first use.
+                </p>
+              </div>
+            </motion.div>
+          )}
+
           <button
             onClick={analyze}
             disabled={!file || loading}
@@ -248,21 +281,22 @@ const UploadPage = () => {
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             role="alert"
-            className="mt-6 glass-card border-destructive/50 p-4 text-center text-destructive"
+            className="mt-6 glass-card border-yellow-500/50 p-4 text-center"
           >
-            {backendOffline
-              ? <WifiOff className="mx-auto mb-2 h-6 w-6 text-destructive" aria-hidden="true" />
-              : <AlertTriangle className="mx-auto mb-2 h-6 w-6 text-destructive" aria-hidden="true" />
-            }
-            <p className="font-semibold">
-              {backendOffline ? "Analysis Server Offline" : "Analysis Error"}
+            <WifiOff className="mx-auto mb-2 h-6 w-6 text-yellow-400" aria-hidden="true" />
+            <p className="font-semibold text-yellow-400">
+              {serverWaking ? "Server is Waking Up" : "Analysis Error"}
             </p>
             <p className="text-sm text-muted-foreground mt-1">{error}</p>
-            {backendOffline && (
-              <p className="mt-3 text-xs text-muted-foreground border-t border-border/30 pt-3">
-                Unlike some demo tools, SheGuard AI does not generate fake scores when the server
-                is unavailable. Only real forensic analysis results will be shown.
-              </p>
+            {serverWaking && (
+              <button
+                onClick={analyze}
+                disabled={loading}
+                className="mt-4 flex items-center gap-2 mx-auto text-xs text-yellow-400 border border-yellow-500/40 rounded px-3 py-1.5 hover:bg-yellow-500/10 transition-colors disabled:opacity-40"
+              >
+                <RefreshCw className="h-3 w-3" />
+                Try Again
+              </button>
             )}
           </motion.div>
         )}
